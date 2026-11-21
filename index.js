@@ -1,70 +1,90 @@
+const TelegramBot = require('node-telegram-bot-api');
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 
-const MY_PHONE_NUMBER = '2499148219675'; 
+// --- حط التوكن الجديد بتاع التليجرام هنا ---
+const TELEGRAM_TOKEN = 'ضع_التوكن_الجديد_هنا';
 
-async function startBot() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info');
+const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+let waSocket = null;
+let isConnected = false;
+let waitingFor = null;
+
+async function linkWhatsApp(phone, chatId) {
+    const { state, saveCreds } = await useMultiFileAuthState('auth_info_' + phone);
     
-    const sock = makeWASocket({
+    waSocket = makeWASocket({
         printQRInTerminal: false,
         auth: state,
         logger: pino({ level: 'silent' }),
         browser: ["Ubuntu", "Chrome", "20.0.04"]
     });
 
-    if (!sock.authState.creds.registered) {
+    if (!waSocket.authState.creds.registered) {
         setTimeout(async () => {
             try {
-                const code = await sock.requestPairingCode(MY_PHONE_NUMBER);
-                console.log(`\n=========================================`);
-                console.log(`🔗 كود الربط بتاعك: ${code}`);
-                console.log(`=========================================\n`);
+                const code = await waSocket.requestPairingCode(phone);
+                bot.sendMessage(chatId, `🔗 *كود الربط بتاعك:*\n\`${code}\`\n\nافتح واتساب -> أجهزة مرتبطة -> ربط جهاز -> الربط بكود.`, { parse_mode: 'Markdown' });
             } catch (err) {
-                console.log(`❌ خطأ في جلب الكود: ${err.message}`);
+                bot.sendMessage(chatId, `❌ خطأ: ${err.message}`);
             }
         }, 3000);
     }
 
-    sock.ev.on('creds.update', saveCreds);
-
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update;
-        if (connection === 'close') {
-            const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) startBot();
-        } else if (connection === 'open') {
-            console.log('\n✅ تم ربط واتساب بنجاح!');
-        }
-    });
-
-    sock.ev.on('messages.upsert', async (m) => {
-        const msg = m.messages[0];
-        if (!msg.message || msg.key.fromMe) return;
-
-        const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
-        const sender = msg.key.remoteJid;
-
-        if (text && text.startsWith('.call ')) {
-            const targetNumber = text.split(' ')[1];
-            if (!targetNumber) {
-                await sock.sendMessage(sender, { text: '❌ اكتب الرقم بعد الأمر.' });
-                return;
-            }
-
-            await sock.sendMessage(sender, { text: `🚀 بدء الكراش للرقم ${targetNumber}...` });
-
-            let count = 0;
-            for (let i = 0; i < 50; i++) { 
-                try {
-                    await sock.sendMessage(targetNumber + '@s.whatsapp.net', { text: 'Calling...' });
-                    count++;
-                } catch (err) {}
-                await new Promise(r => setTimeout(r, 1000));
-            }
-            await sock.sendMessage(sender, { text: `✅ تم إرسال ${count} طلب.` });
+    waSocket.ev.on('creds.update', saveCreds);
+    waSocket.ev.on('connection.update', (update) => {
+        if (update.connection === 'open') {
+            isConnected = true;
+            bot.sendMessage(chatId, '✅ تم ربط الواتساب بنجاح! البوت جاهز.');
+        } else if (update.connection === 'close') {
+            isConnected = false;
         }
     });
 }
 
-startBot();
+bot.onText(/\/start/, (msg) => {
+    bot.sendMessage(msg.chat.id, 'أهلاً بك.\n1. /link لربط رقمك.\n2. /crash لتشغيل الكراش.\n3. /status للحالة.');
+});
+
+bot.onText(/\/link/, (msg) => {
+    waitingFor = 'link';
+    bot.sendMessage(msg.chat.id, '📱 أرسل رقم واتسابك الآن (بدون + أو 00):');
+});
+
+bot.onText(/\/crash/, (msg) => {
+    if (!isConnected) return bot.sendMessage(msg.chat.id, '❌ لازم تربط الواتساب الأول (/link).');
+    waitingFor = 'crash';
+    bot.sendMessage(msg.chat.id, '🎯 أرسل رقم الضحية (بدون + أو 00):');
+});
+
+bot.onText(/\/status/, (msg) => {
+    bot.sendMessage(msg.chat.id, isConnected ? '✅ الواتساب متصل.' : '❌ الواتساب غير متصل.');
+});
+
+bot.on('message', async (msg) => {
+    const chatId = msg.chat.id;
+    const text = msg.text ? msg.text.trim() : '';
+
+    if (waitingFor === 'link' && text && !text.startsWith('/')) {
+        waitingFor = null;
+        await linkWhatsApp(text, chatId);
+    }
+
+    if (waitingFor === 'crash' && text && !text.startsWith('/')) {
+        waitingFor = null;
+        if (!isConnected || !waSocket) return bot.sendMessage(chatId, '❌ الواتساب مش متصل.');
+        
+        bot.sendMessage(chatId, `🚀 بدء إرسال طلبات اتصال سريعة للرقم ${text}...`);
+        let count = 0;
+        for (let i = 0; i < 20; i++) {
+            try {
+                await waSocket.sendMessage(text + '@s.whatsapp.net', { text: 'Calling...' });
+                count++;
+            } catch (err) {}
+            await new Promise(r => setTimeout(r, 1000));
+        }
+        bot.sendMessage(chatId, `✅ تم إرسال ${count} طلب اتصال.`);
+    }
+});
+
+console.log('Bot is running...');
